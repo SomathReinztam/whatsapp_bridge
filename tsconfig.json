@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "commonjs",
+    "lib": ["ES2020"],
+    "strict": true,
+    "esModuleInterop": true,
+    // Los .d.ts de puppeteer-core (dependencia de whatsapp-web.js) asumen el lib "DOM",
+    // que aquí no aplica: sin esto `npx tsc` falla por errores ajenos a este código.
+    "skipLibCheck": true,
+    "outDir": "./dist",
+    "rootDir": "./src"
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

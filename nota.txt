@@ -1,0 +1,80 @@
+Para levantar:
+cd whatsapp_bridge
+cp .env.example .env    # revisa CHATSUNTALK_API_KEY y S3_PUBLIC_ENDPOINT
+
+# Si la FastAPI corre en tu máquina host (localhost:8000), host.docker.internal ya apunta ahí.
+# Si corre en otro servidor, sobreescribe la variable:
+# CHATSUNTALK_API_URL=http://IP-DEL-SERVER:8000 docker compose up -d
+
+docker compose up --build
+
+La primera vez verás el QR en los logs:
+docker compose logs -f
+
+Luego de escanear, para correr en background:
+docker compose up -d
+
+
+--- whatsapp-web.js está pineado a un commit ---
+
+En package.json la dependencia apunta al tarball de un COMMIT (2dc9466), no al de la rama
+main. Con `archive/refs/heads/main.tar.gz` el contenido cambia cada vez que se mueve main,
+el hash guardado en package-lock.json deja de coincidir y `npm install` revienta con
+EINTEGRITY dentro del Dockerfile (en local no se nota porque node_modules ya está puesto).
+
+2dc9466 (2026-05-14, v1.34.7) es el snapshot que ya estaba instalado, así que pinearlo no
+cambió de versión. Para actualizar la librería: cambia el SHA en package.json y corre
+`npm install` para refrescar el lock.
+
+
+--- Media (audios, imágenes, videos) ---
+
+El bridge descarga el archivo de WhatsApp, lo sube a MinIO y le manda al agente un
+ENLACE PREFIRMADO, no los bytes. Es el mismo contrato que el agente ya tiene contra el
+backend real (enlace de Backblaze que descarga con httpx antes de transcribir/analizar).
+
+Cuerpo que recibe el endpoint del agente:
+
+    {
+      "phone": "573001112233",
+      "message": "<texto o caption; puede venir vacío>",
+      "model": "openai/gpt-oss-120b",
+      "media_type": "audio" | "image" | "video" | "document",   // ausente si es texto
+      "media_url": "http://localhost:9000/whatsapp-media/...?X-Amz-...",
+      "media_mimetype": "audio/ogg; codecs=opus",
+      "media_error": "<motivo>",   // solo si hubo media y NO se pudo subir
+      "voice_url": "<= media_url>" // TRANSITORIO: para la rama feat/audio-delay
+    }
+
+Si la subida falla, el turno llega igual con media_type + media_error y SIN media_url,
+para que el agente pueda avisarle al usuario en vez de quedarse callado.
+
+Las ubicaciones se registran en el log y se descartan: el agente aún no las trata.
+
+Consola de MinIO para ver los archivos subidos: http://localhost:9001
+(usuario/clave = S3_ACCESS_KEY / S3_SECRET_KEY, por defecto minioadmin/minioadmin)
+
+
+--- Pasar a Backblaze B2 ---
+
+No se toca el código, solo el .env (B2 expone una API S3-compatible):
+
+    S3_ENDPOINT=https://s3.us-west-004.backblazeb2.com
+    S3_PUBLIC_ENDPOINT=https://s3.us-west-004.backblazeb2.com
+    S3_REGION=us-west-004
+    S3_ACCESS_KEY=<keyID>
+    S3_SECRET_KEY=<applicationKey>
+    S3_ENSURE_BUCKET=false      # B2 no soporta CreateBucket por la API S3
+
+y se quita el servicio `minio` del docker-compose.
+
+
+--- Ojo con S3_PUBLIC_ENDPOINT ---
+
+La firma SigV4 incluye el host, así que la URL se firma con el endpoint desde el que el
+AGENTE va a descargar, que no es el mismo desde el que sube el bridge:
+
+    agente en el host          -> S3_PUBLIC_ENDPOINT=http://localhost:9000
+    agente en esta red docker  -> S3_PUBLIC_ENDPOINT=http://minio:9000
+
+Si no coinciden, la descarga falla con SignatureDoesNotMatch.

@@ -1,0 +1,22 @@
+{
+  "name": "chatsuntalk-whatsapp-bridge",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "ts-node src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1105.0",
+    "@aws-sdk/s3-request-presigner": "^3.1105.0",
+    "dotenv": "^16.4.5",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "https://github.com/wwebjs/whatsapp-web.js/archive/2dc9466facb027caee19dbf285e0a2763f5373bb.tar.gz"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/qrcode-terminal": "^0.12.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}
