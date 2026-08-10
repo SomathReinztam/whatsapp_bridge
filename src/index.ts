@@ -1,4 +1,4 @@
-import { Client, LocalAuth, Message as WaMessage } from 'whatsapp-web.js';
+import { Client, LocalAuth, Message as WaMessage, MessageMedia } from 'whatsapp-web.js';
 import qrcode from 'qrcode-terminal';
 
 import { config } from './config';
@@ -35,6 +35,9 @@ type AgentResponse = {
     suntalk_state?: string;
     summary?: string | null;
     tag?: string | null;
+    // Enlaces prefirmados de las imágenes que generó el agente (tool `generate_image`).
+    // El bridge las descarga (host resoluble desde aquí, p. ej. minio:9000) y las envía.
+    image_urls?: string[];
 };
 
 const client = new Client({
@@ -160,6 +163,20 @@ client.on('message', async (msg: WaMessage) => {
         if (data.text) {
             await client.sendMessage(msg.from, data.text);
             console.log(`📤 [${parsed.phone}] ${data.text.slice(0, 80)}...`);
+        }
+
+        // Imágenes generadas por el agente: se descargan del enlace prefirmado (MinIO/B2)
+        // y se envían como media. Un fallo en una no corta el turno ni las demás.
+        if (data.image_urls?.length) {
+            for (const url of data.image_urls) {
+                try {
+                    const media = await MessageMedia.fromUrl(url, { unsafeMime: true });
+                    await client.sendMessage(msg.from, media);
+                    console.log(`🖼️  [${parsed.phone}] imagen enviada`);
+                } catch (err) {
+                    console.error(`❌ [${parsed.phone}] no se pudo enviar la imagen:`, err);
+                }
+            }
         }
     } catch (err) {
         console.error('❌ Error llamando a ChatSunTalk API:', err);
