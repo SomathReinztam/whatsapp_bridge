@@ -82,6 +82,11 @@ async function buildAgentRequest(parsed: ParsedMessage): Promise<AgentRequest> {
 
     if (!parsed.media) {
         request.media_error = parsed.mediaError ?? 'no se pudo obtener el archivo';
+        // Antes esta rama era silenciosa: el media se perdía sin dejar rastro en el log y
+        // el agente solo veía "no se pudo procesar". Se registra el motivo real.
+        console.error(
+            `⚠️  [${parsed.phone}] sin media utilizable (${request.media_type}): ${request.media_error}`,
+        );
         return request;
     }
 
@@ -138,11 +143,23 @@ client.on('message', async (msg: WaMessage) => {
         return;
     }
 
-    // La ubicación todavía no tiene tratamiento en el agente: se registra y se descarta
-    // para no inventar un contrato que después haya que deshacer.
+    // La ubicación llega como tarjeta nativa de WhatsApp. El agente no tiene un contrato
+    // propio de ubicación, pero SÍ sabe leer un enlace de Google Maps como texto (es el
+    // mismo paso del flujo de postulación). En vez de descartarla, la convertimos a un
+    // enlace de Maps y la mandamos como un turno de texto normal.
     if (parsed.kind === 'location') {
-        console.log(`📍 [${parsed.phone}] ubicación recibida (aún no soportada, se ignora)`);
-        return;
+        if (!parsed.location) {
+            console.warn(`📍 [${parsed.phone}] ubicación sin coordenadas, se ignora`);
+            return;
+        }
+        const { latitude, longitude } = parsed.location;
+        const mapsUrl = `https://www.google.com/maps?q=${latitude},${longitude}`;
+        const caption = parsed.text.trim();
+        parsed.kind = 'text';
+        parsed.text = caption
+            ? `${caption}\nUbicación compartida: ${mapsUrl}`
+            : `Ubicación compartida: ${mapsUrl}`;
+        console.log(`📍 [${parsed.phone}] ubicación -> ${mapsUrl}`);
     }
 
     // Texto vacío sin media: nada que procesar.
