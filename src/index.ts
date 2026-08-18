@@ -6,38 +6,40 @@ import { MediaKind, ParsedMessage, parseMessage, shouldIgnoreMessage } from './m
 import { ensureBucket, uploadMedia } from './storage';
 
 /**
- * Cuerpo que se envía al endpoint del agente.
+ * Un adjunto del turno, ya subido a MinIO/B2.
  *
  * El media viaja como ENLACE, no como bytes: es el mismo contrato que el agente ya
- * tiene contra el backend real (un enlace de Backblaze que descarga antes de
- * transcribir/analizar). El agente decide qué hacer según `media_type`.
+ * tiene contra el backend real (un enlace que descarga antes de transcribir/analizar).
+ * El agente decide qué hacer según `type`.
  *
- * Cuando hubo media pero no se pudo subir, va `media_type` + `media_error` SIN
- * `media_url`: el turno llega igual y el agente puede avisarle al usuario en vez de
- * quedarse mudo.
+ * Cuando hubo media pero no se pudo subir, va `type` + `error` SIN `url`: el turno llega
+ * igual y el agente puede avisarle al usuario en vez de quedarse mudo.
+ */
+type MediaItem = {
+    type: MediaKind;
+    url?: string;
+    mimetype?: string;
+    error?: string;
+};
+
+/**
+ * Cuerpo que se envía al endpoint del agente. `media` es la LISTA de adjuntos del turno
+ * (hoy 0 o 1: WhatsApp entrega un adjunto por mensaje).
  */
 type AgentRequest = {
     phone: string;
     message: string;
     model: string;
-    media_type?: MediaKind;
-    media_url?: string;
-    media_mimetype?: string;
-    media_error?: string;
-    // TRANSITORIO: la rama `feat/audio-delay` del agente todavía espera el campo
-    // `voice_url` para las notas de voz. Se manda duplicado con `media_url` para poder
-    // probar contra esa rama sin tocarla. Eliminar cuando el agente lea `media_url`.
-    voice_url?: string;
+    media: MediaItem[];
 };
 
 type AgentResponse = {
     text?: string;
     suntalk_state?: string;
-    summary?: string | null;
-    tag?: string | null;
-    // Enlaces prefirmados de las imágenes que generó el agente (tool `generate_image`).
-    // El bridge las descarga (host resoluble desde aquí, p. ej. minio:9000) y las envía.
-    image_urls?: string[];
+    // Enlaces prefirmados de los archivos que generó el agente (hoy imágenes de la tool
+    // `generate_image`; a futuro PDFs/planillas). El bridge los descarga (host resoluble
+    // desde aquí, p. ej. minio:9000) y los envía al usuario.
+    media?: string[];
 };
 
 const client = new Client({
@@ -74,23 +76,25 @@ async function buildAgentRequest(parsed: ParsedMessage): Promise<AgentRequest> {
         phone: parsed.phone,
         message: parsed.text,
         model: config.llmModel,
+        media: [],
     };
 
     if (parsed.kind === 'text') return request;
 
-    request.media_type = parsed.kind as MediaKind;
+    const item: MediaItem = { type: parsed.kind as MediaKind };
+    request.media.push(item);
 
     if (!parsed.media) {
-        request.media_error = parsed.mediaError ?? 'no se pudo obtener el archivo';
+        item.error = parsed.mediaError ?? 'no se pudo obtener el archivo';
         // Antes esta rama era silenciosa: el media se perdía sin dejar rastro en el log y
         // el agente solo veía "no se pudo procesar". Se registra el motivo real.
         console.error(
-            `⚠️  [${parsed.phone}] sin media utilizable (${request.media_type}): ${request.media_error}`,
+            `⚠️  [${parsed.phone}] sin media utilizable (${item.type}): ${item.error}`,
         );
         return request;
     }
 
-    request.media_mimetype = parsed.media.mimetype;
+    item.mimetype = parsed.media.mimetype;
 
     try {
         const uploaded = await uploadMedia({
@@ -101,11 +105,10 @@ async function buildAgentRequest(parsed: ParsedMessage): Promise<AgentRequest> {
             messageId: parsed.waMessageId,
             filename: parsed.media.filename,
         });
-        request.media_url = uploaded.url;
-        if (parsed.media.kind === 'audio') request.voice_url = uploaded.url;
+        item.url = uploaded.url;
         console.log(`☁️  Subido ${uploaded.key} (${uploaded.bytes} bytes)`);
     } catch (err) {
-        request.media_error = `no se pudo subir el archivo al almacenamiento: ${err}`;
+        item.error = `no se pudo subir el archivo al almacenamiento: ${err}`;
         console.error(`❌ Error subiendo media de ${parsed.phone}:`, err);
     }
 
@@ -182,16 +185,17 @@ client.on('message', async (msg: WaMessage) => {
             console.log(`📤 [${parsed.phone}] ${data.text.slice(0, 80)}...`);
         }
 
-        // Imágenes generadas por el agente: se descargan del enlace prefirmado (MinIO/B2)
-        // y se envían como media. Un fallo en una no corta el turno ni las demás.
-        if (data.image_urls?.length) {
-            for (const url of data.image_urls) {
+        // Archivos generados por el agente (hoy imágenes; a futuro PDFs/planillas): se
+        // descargan del enlace prefirmado (MinIO/B2) y se envían como media. Un fallo en
+        // uno no corta el turno ni los demás.
+        if (data.media?.length) {
+            for (const url of data.media) {
                 try {
                     const media = await MessageMedia.fromUrl(url, { unsafeMime: true });
                     await client.sendMessage(msg.from, media);
-                    console.log(`🖼️  [${parsed.phone}] imagen enviada`);
+                    console.log(`🖼️  [${parsed.phone}] archivo enviado`);
                 } catch (err) {
-                    console.error(`❌ [${parsed.phone}] no se pudo enviar la imagen:`, err);
+                    console.error(`❌ [${parsed.phone}] no se pudo enviar el archivo:`, err);
                 }
             }
         }
