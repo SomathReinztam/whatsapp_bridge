@@ -3,6 +3,9 @@ services:
   # En producción este servicio desaparece y las variables S3_* apuntan a Backblaze B2,
   # que expone la misma API S3. El bridge no cambia.
   minio:
+    # Opcional: en dev se reutiliza el MinIO que ya corre en el host (SunTalk/minio).
+    # Para usar este: docker compose --profile local-minio up
+    profiles: ["local-minio"]
     image: minio/minio:latest
     restart: unless-stopped
     command: server /data --console-address ":9001"
@@ -25,9 +28,6 @@ services:
   whatsapp-bridge:
     build: .
     restart: unless-stopped
-    depends_on:
-      minio:
-        condition: service_healthy
     volumes:
       - wa_auth:/app/.wwebjs_auth
       - wa_cache:/app/.wwebjs_cache
