@@ -168,3 +168,22 @@ export async function uploadMedia(input: UploadMediaInput): Promise<UploadedMedi
 
     return { url, key, bytes: input.data.length };
 }
+
+/**
+ * Baja un objeto del bucket por su key. El agente devuelve las keys de los archivos que
+ * genera (no enlaces): bridge y agente comparten bucket, así que se lee directo.
+ */
+export async function downloadObject(
+    key: string,
+): Promise<{ data: Buffer; mimetype: string; filename: string }> {
+    const cleanKey = key.trim().replace(/^\/+/, '');
+    const res = await uploader.send(
+        new GetObjectCommand({ Bucket: storage.bucket, Key: cleanKey }),
+    );
+    const data = Buffer.from(await res.Body!.transformToByteArray());
+    return {
+        data,
+        mimetype: res.ContentType || 'application/octet-stream',
+        filename: cleanKey.split('/').pop() || 'archivo',
+    };
+}

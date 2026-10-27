@@ -3,7 +3,7 @@ import qrcode from 'qrcode-terminal';
 
 import { config } from './config';
 import { MediaKind, ParsedMessage, parseMessage, shouldIgnoreMessage } from './messagePayload';
-import { ensureBucket, uploadMedia } from './storage';
+import { downloadObject, ensureBucket, uploadMedia } from './storage';
 
 /**
  * Un adjunto del turno, ya subido a MinIO/B2.
@@ -17,6 +17,8 @@ import { ensureBucket, uploadMedia } from './storage';
  */
 type MediaItem = {
     type: MediaKind;
+    /** Key en el bucket compartido: la vía preferida del agente. */
+    key?: string;
     url?: string;
     mimetype?: string;
     error?: string;
@@ -36,7 +38,7 @@ type AgentRequest = {
 type AgentResponse = {
     text?: string;
     suntalk_state?: string;
-    // Enlaces prefirmados de los archivos que generó el agente (hoy imágenes de la tool
+    // Keys del bucket compartido (o enlaces) de los archivos que generó el agente (hoy imágenes de la tool
     // `generate_image`; a futuro PDFs/planillas). El bridge los descarga (host resoluble
     // desde aquí, p. ej. minio:9000) y los envía al usuario.
     media?: string[];
@@ -105,6 +107,7 @@ async function buildAgentRequest(parsed: ParsedMessage): Promise<AgentRequest> {
             messageId: parsed.waMessageId,
             filename: parsed.media.filename,
         });
+        item.key = uploaded.key;
         item.url = uploaded.url;
         console.log(`☁️  Subido ${uploaded.key} (${uploaded.bytes} bytes)`);
     } catch (err) {
@@ -191,7 +194,18 @@ client.on('message', async (msg: WaMessage) => {
         if (data.media?.length) {
             for (const url of data.media) {
                 try {
-                    const media = await MessageMedia.fromUrl(url, { unsafeMime: true });
+                    // El agente devuelve KEYS del bucket compartido; por compatibilidad
+                    // también se acepta un enlace http(s).
+                    const media = /^https?:\/\//i.test(url)
+                        ? await MessageMedia.fromUrl(url, { unsafeMime: true })
+                        : await downloadObject(url).then(
+                              (o) =>
+                                  new MessageMedia(
+                                      o.mimetype,
+                                      o.data.toString('base64'),
+                                      o.filename,
+                                  ),
+                          );
                     await client.sendMessage(msg.from, media);
                     console.log(`🖼️  [${parsed.phone}] archivo enviado`);
                 } catch (err) {
