@@ -147,6 +147,60 @@ function backfillSerializedId(msg: WaMessage): string | undefined {
  * "no se pudo procesar". Un par de reintentos con espera corta lo resuelve casi siempre.
  * Devuelve el media descargado o lanza el ÚLTIMO error real (ya no silencioso).
  */
+/**
+ * Reemplazo de `msg.downloadMedia()` para WhatsApp Web recientes: el gestor de descargas
+ * ahora valida el tipo del archivo descifrado y, sin `mimetype` en los argumentos, lo ve
+ * como `application/octet-stream` y lanza `InvalidMediaFileType` (que whatsapp-web.js
+ * 1.34.7 propaga como el opaco `t: t`). Aquí se repite el mismo flujo de la librería
+ * pasando `mimetype: msg.mimetype`. Devuelve `undefined` si el media no está disponible.
+ */
+async function downloadMediaPatched(msg: WaMessage) {
+    const page = (msg as any).client?.pupPage;
+    const id = msg?.id?._serialized;
+    if (!page || !id) throw new Error('sin pupPage o id serializado');
+
+    return page.evaluate(async (msgId: string) => {
+        const g = globalThis as any;
+        const col = g.require('WAWebCollections');
+        const m =
+            col.Msg.get(msgId) || (await col.Msg.getMessagesById([msgId]))?.messages?.[0];
+        if (!m || !m.mediaData || m.mediaData.mediaStage === 'REUPLOADING') return null;
+
+        if (m.mediaData.mediaStage !== 'RESOLVED') {
+            await m.downloadMedia({ downloadEvenIfExpensive: true, rmrReason: 1 });
+        }
+        if (m.mediaData.mediaStage.includes('ERROR') || m.mediaData.mediaStage === 'FETCHING') {
+            return null;
+        }
+
+        const mockQpl = {
+            addAnnotations() { return this; },
+            addPoint() { return this; },
+        };
+        try {
+            const decrypted = await g
+                .require('WAWebDownloadManager')
+                .downloadManager.downloadAndMaybeDecrypt({
+                    directPath: m.directPath,
+                    encFilehash: m.encFilehash,
+                    filehash: m.filehash,
+                    mediaKey: m.mediaKey,
+                    mediaKeyTimestamp: m.mediaKeyTimestamp,
+                    type: m.type,
+                    mimetype: m.mimetype,
+                    signal: new AbortController().signal,
+                    downloadQpl: mockQpl,
+                });
+            const data = await g.WWebJS.arrayBufferToBase64Async(decrypted);
+            return { data, mimetype: m.mimetype, filename: m.filename };
+        } catch (e: any) {
+            if (e?.status === 404) return null;
+            // Los errores de WhatsApp Web son objetos minificados; se serializa lo útil.
+            throw new Error(`${e?.name ?? 'Error'}: ${e?.message ?? String(e)}`);
+        }
+    }, id);
+}
+
 async function downloadMediaWithRetry(msg: WaMessage) {
     // Reasegura el serialized antes de cada intento (el objeto `id` es el mismo que lee
     // la librería por dentro); sin esto, el media falla con el opaco `r: r`.
@@ -154,7 +208,8 @@ async function downloadMediaWithRetry(msg: WaMessage) {
     let lastErr: unknown = new Error('WhatsApp no entregó el contenido del archivo');
     for (let intento = 1; intento <= DOWNLOAD_RETRIES; intento++) {
         try {
-            const media = await msg.downloadMedia();
+            // Primero la descarga parcheada; si no entrega nada, la de la librería.
+            const media = (await downloadMediaPatched(msg)) ?? (await msg.downloadMedia());
             if (media?.data) return media;
         } catch (err) {
             lastErr = err;
@@ -162,6 +217,74 @@ async function downloadMediaWithRetry(msg: WaMessage) {
         if (intento < DOWNLOAD_RETRIES) await sleep(DOWNLOAD_RETRY_DELAY_MS);
     }
     throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
+/**
+ * Diagnóstico de una descarga fallida: repite dentro de la página de WhatsApp Web los
+ * pasos que hace `downloadMedia()` y devuelve en qué etapa se rompe y el error REAL
+ * (la librería solo propaga el opaco `t: t`). Nunca lanza; es solo para el log.
+ */
+async function diagnoseMediaFailure(msg: WaMessage): Promise<unknown> {
+    try {
+        const page = (msg as any).client?.pupPage;
+        const id = msg?.id?._serialized;
+        return await page.evaluate(async (msgId: string) => {
+            const info: Record<string, unknown> = { msgId };
+            const describe = (e: any) => ({
+                name: e?.name,
+                message: e?.message,
+                status: e?.status,
+                stack: String(e?.stack ?? '').split('\n').slice(0, 4).join(' | '),
+                keys: e && typeof e === 'object' ? Object.keys(e) : undefined,
+            });
+            try {
+                const col = (globalThis as any).require('WAWebCollections');
+                let m = col.Msg.get(msgId);
+                info.inCache = !!m;
+                if (!m) {
+                    m = (await col.Msg.getMessagesById([msgId]))?.messages?.[0];
+                    info.fetchedById = !!m;
+                }
+                if (!m) return info;
+                info.type = m.type;
+                info.mediaStage = m.mediaData?.mediaStage;
+                info.hasDirectPath = !!m.directPath;
+                info.hasMediaKey = !!m.mediaKey;
+                info.size = m.size;
+                if (m.mediaData?.mediaStage !== 'RESOLVED') {
+                    try {
+                        await m.downloadMedia({ downloadEvenIfExpensive: true, rmrReason: 1 });
+                        info.stageAfterDownload = m.mediaData?.mediaStage;
+                    } catch (e) {
+                        info.downloadMediaError = describe(e);
+                    }
+                }
+                try {
+                    const dm = (globalThis as any).require('WAWebDownloadManager').downloadManager;
+                    info.dmMethods = Object.keys(dm ?? {}).slice(0, 25);
+                    const mockQpl = { addAnnotations() { return this; }, addPoint() { return this; } };
+                    const out = await dm.downloadAndMaybeDecrypt({
+                        directPath: m.directPath,
+                        encFilehash: m.encFilehash,
+                        filehash: m.filehash,
+                        mediaKey: m.mediaKey,
+                        mediaKeyTimestamp: m.mediaKeyTimestamp,
+                        type: m.type,
+                        signal: new AbortController().signal,
+                        downloadQpl: mockQpl,
+                    });
+                    info.decryptedBytes = (out as ArrayBuffer)?.byteLength;
+                } catch (e) {
+                    info.decryptError = describe(e);
+                }
+            } catch (e) {
+                info.error = describe(e);
+            }
+            return info;
+        }, id);
+    } catch (e) {
+        return { diagnosticFailed: String(e) };
+    }
 }
 
 async function resolveContact(msg: WaMessage): Promise<{ phone: string; contactName: string }> {
@@ -230,6 +353,10 @@ export async function parseMessage(msg: WaMessage, maxBytes: number): Promise<Pa
         parsed.mediaError = `no se pudo descargar el archivo de WhatsApp: ${err}`;
         console.error(
             `❌ [${phone}] descarga de media falló tras ${DOWNLOAD_RETRIES} intentos (${msg.type}): ${err}`,
+        );
+        console.error(
+            `🔎 [${phone}] diagnóstico:`,
+            JSON.stringify(await diagnoseMediaFailure(msg)),
         );
         return parsed;
     }
