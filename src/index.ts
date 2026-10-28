@@ -3,6 +3,8 @@ import qrcode from 'qrcode-terminal';
 
 import { config } from './config';
 import { MediaKind, ParsedMessage, parseMessage, shouldIgnoreMessage } from './messagePayload';
+import { patchMediaSend } from './waPatches';
+import { diagnoseSendFailure } from './diagnostics';
 import { downloadObject, ensureBucket, uploadMedia } from './storage';
 
 /**
@@ -57,7 +59,8 @@ client.on('qr', (qr) => {
     qrcode.generate(qr, { small: true });
 });
 
-client.on('ready', () => {
+client.on('ready', async () => {
+    await patchMediaSend(client);
     console.log('✅ WhatsApp conectado. Esperando mensajes...');
 });
 
@@ -206,7 +209,17 @@ client.on('message', async (msg: WaMessage) => {
                                       o.filename,
                                   ),
                           );
-                    await client.sendMessage(msg.from, media);
+                    try {
+                        await client.sendMessage(msg.from, media);
+                    } catch (sendErr) {
+                        // El error de WhatsApp Web es opaco: se vuelca en qué paso del envío
+                        // se rompe para poder parchearlo (ver README, "Problemas conocidos").
+                        console.error(
+                            `🔎 [${parsed.phone}] diagnóstico de envío (${media.mimetype}, ${media.data.length} b64):`,
+                            JSON.stringify(await diagnoseSendFailure(client, media, msg.from)),
+                        );
+                        throw sendErr;
+                    }
                     console.log(`🖼️  [${parsed.phone}] archivo enviado`);
                 } catch (err) {
                     console.error(`❌ [${parsed.phone}] no se pudo enviar el archivo:`, err);
